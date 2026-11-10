@@ -1,0 +1,9 @@
+DNS LOAD BALANCING RESULTS
+Total requests: 100
+Successful requests: 100
+Failed requests: 0
+
+Backend IP        First place   Percentage
+172.28.0.11                32       32.00%
+172.28.0.12                38       38.00%
+172.28.0.13                30       30.00%
