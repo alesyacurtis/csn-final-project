@@ -1,351 +1,229 @@
-# DNS-сервер с балансировкой нагрузки, кэшированием и перенаправлением запросов
+# DNS Server with Caching and Load Balancing
 
-Курсовой проект по **Computer Systems & Networks**. Цель — настроить DNS-систему на базе **CoreDNS**, проверить DNS Load Balancing, Caching и Forwarding, собрать измерения и объяснить результаты.
+A containerized DNS lab built with **Docker Compose**, **CoreDNS**, and **Nginx**. It demonstrates local DNS zone resolution, DNS-based load balancing through multiple A records, external DNS forwarding, and response caching.
 
-В репозитории уже подготовлено Docker-окружение: CoreDNS, три Nginx-сервера и отдельный клиент с `dig` и `curl`. Внутренняя зона `lab.test` обслуживается локально, а запросы к внешним доменам перенаправляются на публичные DNS-резолверы.
+## Overview
 
-Этот README описывает текущее состояние проекта и работу, которую нужно завершить команде. **Автоматических тестовых скриптов и сохранённых результатов измерений пока нет — их должны подготовить участники.**
+The project runs five containers on a dedicated Docker bridge network:
 
-## 1. Что уже сделано
+- **CoreDNS** — serves the internal `lab.test` zone, changes the order of DNS records for `app.lab.test`, and forwards external DNS queries to upstream resolvers.
+- **DNS client** — a Debian-based container with `dig`, `nslookup`, and `curl` for interacting with the DNS server and backend services.
+- **Three Nginx backends** — separate HTTP containers, each serving its own page so that the responding backend can be identified.
 
-| Часть проекта | Текущее состояние |
+All services communicate over the `dns-lab` network (`172.28.0.0/24`). The DNS client is configured to use CoreDNS (`172.28.0.53`) as its resolver.
+
+## Architecture
+
+| Service | Role | IP address |
+|---|---|---:|
+| `dns-server` | CoreDNS DNS server | `172.28.0.53` |
+| `dns-client` | DNS and HTTP client | `172.28.0.20` |
+| `backend1` | Nginx backend 1 | `172.28.0.11` |
+| `backend2` | Nginx backend 2 | `172.28.0.12` |
+| `backend3` | Nginx backend 3 | `172.28.0.13` |
+
+### DNS functionality
+
+- **Internal DNS zone:** CoreDNS serves records for `lab.test` from `dns/zones/db.lab.test`.
+- **Multiple A records:** `app.lab.test` resolves to the three backend addresses: `172.28.0.11`, `172.28.0.12`, and `172.28.0.13`.
+- **DNS-based load balancing:** the CoreDNS `loadbalance` plugin changes the order of A records in DNS responses. This gives clients different backend addresses as the first result across queries.
+- **External DNS forwarding:** queries outside `lab.test` are forwarded to Cloudflare DNS (`1.1.1.1`) and Google Public DNS (`8.8.8.8`).
+- **DNS caching:** the CoreDNS `cache` plugin temporarily stores responses in the external DNS server block, with a configured maximum TTL of 30 seconds.
+
+> **Important:** this project demonstrates DNS answer ordering, not HTTP load balancing by a reverse proxy. CoreDNS returns possible backend addresses; the client decides which address to contact. The experiment measures the order of DNS answers, not the distribution of HTTP requests. Backend health checks and automatic failover are not implemented.
+
+## Technology Stack
+
+- Docker Engine and Docker Compose
+- CoreDNS `1.12.0`
+- Nginx (`nginx:stable-alpine`)
+- Debian Bookworm Slim (DNS client image)
+- `dnsutils` (`dig`, `nslookup`) and `curl`
+- Bash scripts for automated tests
+
+## Repository Structure
+
+```text
+.
+├── backends/
+│   ├── backend1/
+│   │   └── index.html
+│   ├── backend2/
+│   │   └── index.html
+│   └── backend3/
+│       └── index.html
+├── compose.yml
+├── dns/
+│   ├── Corefile
+│   └── zones/
+│       └── db.lab.test
+├── dns-client/
+│   └── Dockerfile
+├── docs/
+│   └── load_balancing.md
+├── results/
+│   └── load_balancing/
+│       ├── queries_20261109_154057.tsv
+│       └── summary_20261109_154057.txt
+├── tests/
+│   ├── caching/
+│   │   └── test_caching.sh
+│   └── load_balancing/
+│       └── test_load_balancing.sh
+└── README.md
+```
+
+### Main files and directories
+
+| Path | Description |
 |---|---|
-| Выбор DNS-сервера | Используется CoreDNS `1.12.0`; выбирать между BIND, Unbound и CoreDNS больше не нужно |
-| Docker-инфраструктура | Настроены пять сервисов, общая сеть и фиксированные IP-адреса |
-| DNS Client | Есть отдельный контейнер с Bash, `dig` и `curl`, использующий CoreDNS как DNS-сервер |
-| Внутренняя зона | Создана `lab.test`, включая `ns.lab.test` и три A-записи для `app.lab.test` |
-| Load Balancing | Включён `loadbalance round_robin`; автором начального окружения выполнены повторные запросы и проверено изменение порядка IP-адресов |
-| Forwarding | В Corefile уже задано перенаправление на `1.1.1.1` и `8.8.8.8`; нужны проверки и документирование результатов |
-| Caching | В блоке внешних запросов уже есть `cache 30`; нужны проверка попаданий в кэш, истечения TTL и сравнение с отключённым кэшем |
-| Автоматизация и статистика | Предстоит написать скрипты, провести измерения и оформить выводы |
+| `compose.yml` | Defines the five services, the Docker bridge network, static IP addresses, and configuration/page mounts. |
+| `dns/Corefile` | Main CoreDNS configuration: internal zone handling, DNS record ordering, external forwarding, and caching. |
+| `dns/zones/db.lab.test` | DNS zone file with SOA and NS records and the A records for `ns.lab.test` and `app.lab.test`. |
+| `dns-client/Dockerfile` | Builds the client image and installs DNS utilities and `curl`. |
+| `backends/backend*/index.html` | Individual pages served by the three Nginx backends. |
+| `docs/load_balancing.md` | Detailed description of the DNS load-balancing experiment and its results. |
+| `tests/caching/test_caching.sh` | Automated test for external DNS forwarding, cache hits, and cache expiration. |
+| `tests/load_balancing/test_load_balancing.sh` | Automated test that validates DNS answers and records the first A-record address across multiple queries. |
+| `results/load_balancing/` | Raw query data in TSV format and a summary from a load-balancing experiment. |
 
-По исходному распределению автор начального окружения уже выполнил:
+## Requirements
 
-- **Из задач участника №3, пункты 1–7:** структура репозитория, Docker Compose, общая сеть, контейнер CoreDNS, три Nginx-контейнера, фиксированные IP backend-серверов и отдельный DNS Client.
-- **Из задач участника №1, пункты 1–6:** изучение DNS Round Robin, внутренняя зона, несколько A-записей для `app.lab.test`, настройка изменения их порядка в CoreDNS и ручная проверка повторных запросов.
+Before starting, install:
 
-Эту основу не нужно создавать заново. Следующий этап — автоматизация проверок, экспериментальное подтверждение работы кэша и подготовка результатов для сдачи.
+- **Docker Engine**
+- **Docker Compose v2** (the `docker compose` command)
+- **Git**
 
-## 2. Быстрый запуск
+The first build requires network access to download the container images and build the DNS client image. External DNS forwarding also requires the environment to be able to reach the configured upstream resolvers.
 
-Нужны Git, установленный и запущенный Docker Engine либо Docker Desktop и Docker Compose с командой `docker compose`. Для загрузки образов, установки пакетов в клиентский образ и проверки внешних DNS-запросов нужен доступ к Интернету.
+The Compose file uses the subnet `172.28.0.0/24`. Make sure this subnet does not conflict with an existing local or Docker network.
 
-Все команды `docker compose` ниже выполняются **на хосте из корня репозитория**, где находится `compose.yml`.
+## Getting Started
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/alesyacurtis/csn-final-project.git
+cd csn-final-project
+```
+
+Run the remaining commands from the repository root, where `compose.yml` is located.
+
+### 2. Build and start the environment
 
 ```bash
 docker compose up -d --build
+```
+
+This builds the DNS client image if needed, pulls the CoreDNS and Nginx images, creates the `dns-lab` network, and starts all five services.
+
+### 3. Check the containers
+
+```bash
 docker compose ps
 ```
 
-Ожидается пять запущенных сервисов: `dns-server`, `dns-client`, `backend1`, `backend2`, `backend3`. Запущенный контейнер ещё не гарантирует готовность сервиса: healthcheck в текущей конфигурации не задан.
+The expected services are `dns-server`, `dns-client`, `backend1`, `backend2`, and `backend3`.
 
-Открыть Bash внутри клиента:
+### 4. Open the DNS client shell
 
 ```bash
 docker compose exec dns-client bash
 ```
 
-**Все команды `dig` и `curl` из разделов 5–7 выполняются внутри `dns-client`.** Устанавливать эти утилиты на хост не требуется.
+The client container is configured to use `172.28.0.53` as its DNS resolver. From inside the container, you can issue DNS queries and HTTP requests.
+
+For example, to query the internal application name:
 
 ```bash
-cat /etc/resolv.conf
+dig app.lab.test A
 ```
 
-Ожидается `nameserver 172.28.0.53`: эта настройка записывается при старте клиента. Для воспроизводимых DNS-проверок ниже дополнительно указывается сервер через `@172.28.0.53`.
-
-Чтобы выйти из клиента:
+To explicitly send the query to CoreDNS:
 
 ```bash
-exit
+dig @172.28.0.53 app.lab.test A
 ```
 
-Остановить окружение и удалить его контейнеры и сеть, сохранив файлы проекта:
+To query an external domain through the configured forwarding and caching path:
+
+```bash
+dig example.com A
+```
+
+To request a specific backend directly:
+
+```bash
+curl http://172.28.0.11
+curl http://172.28.0.12
+curl http://172.28.0.13
+```
+
+Exit the client shell with `exit` when finished.
+
+## Automated Tests
+
+Run test scripts from the repository root while the Compose environment is running.
+
+### DNS load-balancing test
+
+```bash
+./tests/load_balancing/test_load_balancing.sh 100
+```
+
+The argument sets the number of DNS queries. For each query, the script checks that the expected three backend IP addresses are present, records their order, and extracts the first address. It writes timestamped query data to a TSV file and a summary to a text file under `results/load_balancing/`.
+
+The documented 100-query run completed with 100 valid DNS answers. The first-position distribution was 32% for `172.28.0.11`, 38% for `172.28.0.12`, and 30% for `172.28.0.13`. These figures describe DNS answer ordering, not actual HTTP traffic distribution. See [`docs/load_balancing.md`](docs/load_balancing.md) for the methodology and interpretation.
+
+### DNS caching and forwarding test
+
+The caching test uses CoreDNS metrics to check an initial upstream lookup, a cache hit on a repeated query, and a new upstream lookup after the 30-second cache entry expires.
+
+Before running the script, make sure the external (`.`) server block in `dns/Corefile` contains both `cache 30` and the Prometheus metrics directive `prometheus :9153`. Then recreate the DNS server and run the test:
+
+```bash
+docker compose up -d --force-recreate dns-server
+sudo bash tests/caching/test_caching.sh
+```
+
+Use `sudo` only if your Docker setup requires elevated permissions. The test waits for the cache entry to expire, so it takes at least 31 seconds to complete.
+
+In the documented performance comparison, two sets of 20 queries produced a median query time of **2 ms with caching enabled** and **13.5 ms with caching disabled**. These measurements are specific to the test environment and should not be treated as guaranteed performance figures.
+
+## Useful Docker Commands
+
+View logs from the DNS server:
+
+```bash
+docker compose logs -f dns-server
+```
+
+Restart the DNS server after changing its configuration:
+
+```bash
+docker compose restart dns-server
+```
+
+Stop and remove the containers and the project network:
 
 ```bash
 docker compose down
 ```
 
-## 3. Архитектура и адреса
+Start the environment again later with `docker compose up -d`.
 
-Все сервисы подключены к bridge-сети `dns-lab` с подсетью `172.28.0.0/24`. При стандартном запуске Compose имя Docker-сети — `csn-final-project_dns-lab`.
+## Notes and Limitations
 
-| Сервис | IP-адрес | Назначение |
-|---|---|---|
-| `dns-server` | `172.28.0.53` | CoreDNS, DNS на порту 53 по UDP и TCP |
-| `dns-client` | `172.28.0.20` | Debian Bookworm, `dig`, `curl`, Bash |
-| `backend1` | `172.28.0.11` | Nginx, HTTP на порту 80, страница Backend Server 1 |
-| `backend2` | `172.28.0.12` | Nginx, HTTP на порту 80, страница Backend Server 2 |
-| `backend3` | `172.28.0.13` | Nginx, HTTP на порту 80, страница Backend Server 3 |
+- The internal zone is authoritative for `lab.test`; external names are resolved through the configured upstream DNS resolvers.
+- The 30-second TTL and cache configuration are intended for demonstrating cache behavior in a small lab environment. Query timings can vary with network conditions and the host machine.
+- DNS record reordering does not guarantee an equal distribution of web requests. Client-side DNS caching and address-selection behavior affect which backend is contacted.
+- The configured backend addresses are static. The project does not include backend health monitoring or automatic failover.
 
-```mermaid
-flowchart LR
-    client[DNS Client] -->|DNS-запрос| dns[CoreDNS: 172.28.0.53]
-    dns -->|lab.test| zone[Локальная зона + loadbalance]
-    zone --> addresses[Три A-записи для app.lab.test]
-    dns -->|Остальные домены| cache[Кэш]
-    cache -->|Нет действующей записи| upstream[1.1.1.1 / 8.8.8.8]
-    client -->|HTTP после разрешения имени| backends[Nginx: .11 / .12 / .13]
-```
+## Authors
 
-CoreDNS возвращает адреса; HTTP-соединение клиент устанавливает непосредственно с выбранным Nginx. DNS-сервер не проксирует HTTP-трафик и не проверяет доступность этих backend-серверов. Остановка Nginx сама по себе не удаляет его IP из зоны.
+- Alesia Shemiakina
+- Gleb Petrov
+- Ilyas Abdulkayumov
 
-Порты контейнеров **не опубликованы на хост**. Для приведённых проверок используется `dns-client`; команда `dig @localhost ...` на хосте не обращается к этому CoreDNS.
-
-## 4. Файлы и логика конфигурации
-
-```text
-.
-├── compose.yml                  # Сервисы, сеть, IP-адреса и монтирование файлов
-├── dns/
-│   ├── Corefile                 # Внутренняя зона, loadbalance, forward и cache
-│   └── zones/db.lab.test        # SOA, NS и A-записи зоны lab.test
-├── dns-client/
-│   └── Dockerfile               # Образ клиента с dnsutils и curl
-├── backends/
-│   ├── backend1/index.html      # Страница с идентификатором первого backend
-│   ├── backend2/index.html      # Страница с идентификатором второго backend
-│   └── backend3/index.html      # Страница с идентификатором третьего backend
-└── README.md
-```
-
-Текущий [Corefile](dns/Corefile):
-
-```text
-lab.test {
-    file /etc/coredns/zones/db.lab.test
-    loadbalance round_robin
-}
-
-. {
-    forward . 1.1.1.1 8.8.8.8
-    cache 30
-}
-```
-
-- Блок `lab.test` обслуживает внутреннюю зону из файла. Для `app.lab.test` он возвращает три A-записи, перемешивая их порядок.
-- Блок `.` обрабатывает остальные домены. При отсутствии действующего ответа в кэше запрос передаётся одному из upstream-резолверов. Само наличие двух адресов не означает отправку каждого запроса обоим серверам. См. [документацию forward](https://coredns.io/plugins/forward/).
-- `cache 30` ограничивает время хранения ответа в этом кэше сверху 30 секундами; это не фиксированный TTL для любого ответа. См. [документацию cache](https://coredns.io/plugins/cache/).
-- В локальном блоке `lab.test` плагин `cache` не включён. Значение `$TTL 30` в файле зоны задаёт TTL её записей и является отдельной настройкой.
-
-Не следует путать **корень внутренней зоны `lab.test`** и **корневой блок `.`** в Corefile: запросы к `lab.test` обслуживаются локальным блоком, а не внешним forwarding.
-
-## 5. Ручная проверка DNS и Round Robin
-
-### 5.1. Приложение: `app.lab.test`
-
-Посмотреть DNS-ответ с TTL и заголовком:
-
-```bash
-dig @172.28.0.53 app.lab.test. A
-```
-
-В ответе ожидаются `status: NOERROR`, флаг `aa` авторитетного ответа и три A-записи с адресами `172.28.0.11`, `172.28.0.12`, `172.28.0.13`. Для локального запроса можно добавить `+norecurse`, чтобы не запрашивать рекурсивное разрешение.
-
-Для демонстрации балансировки выполнить одну и ту же команду несколько раз:
-
-```bash
-dig @172.28.0.53 app.lab.test. A +short
-dig @172.28.0.53 app.lab.test. A +short
-dig @172.28.0.53 app.lab.test. A +short
-```
-
-Пример возможных результатов, **не сохранённый результат измерения**:
-
-```text
-Первый запрос:       Второй запрос:      Третий запрос:
-172.28.0.11          172.28.0.12          172.28.0.13
-172.28.0.12          172.28.0.11          172.28.0.12
-172.28.0.13          172.28.0.13          172.28.0.11
-```
-
-Каждый успешный ответ содержит весь набор из трёх адресов. CoreDNS `loadbalance round_robin` **случайно перемешивает записи**, а не обеспечивает строгую последовательность `1 → 2 → 3`. Одинаковый порядок в двух соседних ответах допустим. См. [документацию loadbalance](https://coredns.io/plugins/loadbalance/).
-
-Для статистики нужно считать, какой адрес оказался **первым** в каждом ответе. Подсчёт всех трёх адресов даст одинаковое число для каждого backend и не покажет изменение порядка. На большой выборке доли первых позиций должны приближаться к одной трети, но точное равенство не гарантируется.
-
-Эта проверка показывает распределение порядка DNS-записей. Реальное распределение HTTP-запросов также зависит от поведения клиента и его кэша.
-
-Проверка DNS по TCP:
-
-```bash
-dig @172.28.0.53 app.lab.test. A +tcp
-```
-
-### 5.2. Корень внутренней зоны: `lab.test`
-
-```bash
-dig @172.28.0.53 lab.test. A +noall +comments +answer +authority
-dig @172.28.0.53 lab.test. NS +noall +answer
-dig @172.28.0.53 lab.test. SOA +noall +answer
-dig @172.28.0.53 ns.lab.test. A +short
-```
-
-Ожидаемое поведение текущего файла зоны:
-
-| Запрос | Ожидаемый ответ |
-|---|---|
-| `app.lab.test. A` | Три адреса backend-серверов в переменном порядке |
-| `lab.test. A` | `NOERROR`, пустая секция Answer и SOA в Authority: имя существует, но A-записи нет — NODATA |
-| `lab.test. NS` | `ns.lab.test.` |
-| `lab.test. SOA` | SOA-запись с параметрами зоны и её serial |
-| `ns.lab.test. A` | `172.28.0.53` |
-
-`dig lab.test. A +short` поэтому ничего не напечатает. Это ожидаемо: три A-записи созданы для `app`, а не для `@` — вершины зоны.
-
-Для сравнения запрос несуществующего имени:
-
-```bash
-dig @172.28.0.53 missing.lab.test. A
-```
-
-Здесь ожидается `NXDOMAIN`: такого имени нет в зоне. Это отличается от существующего `lab.test` без записи типа A.
-
-### 5.3. Внешние домены и корневой блок `.`
-
-```bash
-dig @172.28.0.53 example.com. A
-dig @172.28.0.53 example.org. A
-dig @172.28.0.53 . NS
-```
-
-Эти запросы обрабатывает блок `.`: ответ поступает из кэша либо через upstream. Для внешних доменов ожидается успешное разрешение; конкретные IP и TTL зависят от внешней DNS-зоны. Запрос `. NS` возвращает NS-записи глобальной корневой зоны через настроенные резолверы.
-
-## 6. Проверка Nginx
-
-Сначала обратиться к каждому backend напрямую:
-
-```bash
-curl --fail --noproxy '*' http://172.28.0.11/
-curl --fail --noproxy '*' http://172.28.0.12/
-curl --fail --noproxy '*' http://172.28.0.13/
-```
-
-Ожидаются разные HTML-страницы с текстом `Welcome to Backend Server 1`, `2` или `3` и соответствующим IP-адресом.
-
-Затем проверить доступ по DNS-имени через резолвер клиента:
-
-```bash
-curl --fail --noproxy '*' http://app.lab.test/
-```
-
-Ожидается страница одного из трёх серверов. Повторные вызовы не обязаны строго чередовать backend-серверы. Успех этого запроса проверяет связку DNS → HTTP, а статистику порядка A-записей нужно собирать отдельно через `dig`.
-
-## 7. Как исследовать кэширование
-
-Базовая настройка `cache 30` уже присутствует. Нужно подтвердить её работу экспериментами и оформить сравнение.
-
-Для наблюдения за TTL и временем ответа выполнить внутри клиента:
-
-```bash
-dig @172.28.0.53 example.com. A +noall +answer +stats
-sleep 2
-dig @172.28.0.53 example.com. A +noall +answer +stats
-sleep 31
-dig @172.28.0.53 example.com. A +noall +answer +stats
-```
-
-Сравнить TTL в строках ответа и `Query time`. Повторные ответы из кэша обычно показывают уменьшение TTL; после истечения срока хранения следующий запрос должен снова обратиться к upstream. Время `0 msec` означает ограниченную точность измерения `dig`, а не отсутствие затрат на обработку.
-
-Первый запрос этой последовательности **не обязательно выполняется при пустом кэше**: туда мог попасть ответ от предыдущих проверок. Для контролируемого эксперимента можно предварительно перезапустить только CoreDNS **на хосте**, затем дождаться его готовности:
-
-```bash
-docker compose restart dns-server
-```
-
-Это очищает локальный кэш процесса CoreDNS, но не кэши `1.1.1.1` и `8.8.8.8`.
-
-Для завершения исследования требуется:
-
-1. Подтвердить разрешение внешних имён и проверить доступность обоих настроенных upstream.
-2. Зафиксировать первый запрос после очистки локального кэша, повторные запросы до истечения TTL и запрос после истечения TTL.
-3. Подтвердить попадания в кэш и сокращение обращений к upstream наблюдением за DNS-трафиком либо метриками CoreDNS. Одна лишь разница времени ответа не доказывает cache hit; обычный лог входящих запросов тоже не показывает, был ли ответ взят из кэша.
-4. Провести серии примерно по 20–30 измерений с кэшированием и без него при одинаковых условиях. Для варианта без кэша временно убрать `cache 30` из блока `.` и перезапустить CoreDNS; после эксперимента вернуть настройку и снова перезапустить сервис.
-5. Сохранить исходные данные, сравнить медианы и описать влияние сетевых задержек, upstream-кэшей и истечения TTL во время серии.
-
-Не нужно отключать кэш для проверки Round Robin: внутренний блок `lab.test` и сейчас не использует плагин `cache`.
-
-## 8. Что осталось сделать
-
-- Написать проверку после запуска: готовность CoreDNS, внутреннее разрешение по UDP/TCP, ожидаемые ответы для `app.lab.test` и `lab.test`, доступность трёх Nginx и HTTP по имени приложения.
-- Добавить проверку внешнего разрешения с понятным сообщением при недоступности Интернета или upstream.
-- Написать скрипт серии из 50–100 запросов `app.lab.test. A` с возможностью изменить число запросов.
-- Проверять DNS-статус и наличие ровно трёх ожидаемых адресов в каждом успешном ответе; ошибки и таймауты учитывать отдельно.
-- Сохранять порядок A-записей и первый адрес каждого ответа. Считать количество и долю первых позиций для каждого IP среди успешных ответов.
-- Подготовить таблицу или график распределения и выводы. Не требовать строгого чередования или точного равенства долей на малой выборке.
-- Описать реализацию и ограничения DNS-балансировки, включая отличие от распределения HTTP-соединений.
-- Проверить и при необходимости доработать существующие `forward` и `cache`.
-- Написать скрипт проверки внешнего разрешения, повторных запросов и истечения TTL.
-- Подготовить воспроизводимое сравнение с включённым и выключенным локальным кэшем по методике раздела 7.
-- Сохранять домен, тип запроса, статус, TTL, время ответа и условия эксперимента; отдельно учитывать неуспешные запросы.
-- Подготовить результаты, описание конфигурации и объяснение наблюдаемого поведения.
-- Подготовить единый сценарий запуска тестов. Он должен ожидать готовность сервисов, возвращать ненулевой код при ошибке и объединять проверки инфраструктуры, балансировки, кэширования и перенаправления запросов.
-- Организовать сохранение результатов на хосте, чтобы они не терялись после `docker compose down`.
-- Зафиксировать условия измерений: дату, версии образов, конфигурацию, число запросов и интервалы; собрать общую сводку.
-- Объединить изменения и провести итоговую проверку всей системы.
-- Описать вклад команды, подготовить презентацию и провести репетицию демонстрации.
-
-Предлагаемая структура **для будущего добавления**, этих файлов пока нет:
-
-```text
-tests/
-├── smoke.sh                  # Проверка окружения после запуска
-├── load-balancing.sh         # Порядок A-записей и статистика первых позиций
-├── caching.sh                # Cache hit, истечение TTL и измерения
-└── run-all.sh                # Общий запуск проверок
-results/                     # Исходные CSV/TSV и сводки экспериментов
-docs/
-├── load-balancing.md
-├── caching.md
-└── test-results.md
-```
-
-Способ доставки будущих скриптов в `dns-client` нужно реализовать отдельно: сейчас каталога с тестами и его монтирования в Compose нет. Скрипты должны явно указывать DNS-сервер, ограничивать время ожидания и различать DNS-ошибку, таймаут и корректный ответ без A-записи.
-
-## 9. Изменение конфигурации и диагностика
-
-Перед запуском проверить синтаксис Compose и посмотреть состояние сервисов:
-
-```bash
-docker compose config --quiet
-docker compose ps
-docker compose logs --tail=100 dns-server
-```
-
-`docker compose config --quiet` проверяет Compose, но не корректность DNS-зоны и Corefile. Ошибки загрузки CoreDNS нужно искать в логах и проверять запросами. Обычное логирование всех DNS-запросов в текущем Corefile не включено.
-
-После изменения `dns/Corefile` перезапустить DNS-сервер: плагин автоматической перезагрузки Corefile сейчас не настроен.
-
-```bash
-docker compose restart dns-server
-```
-
-При изменении `dns/zones/db.lab.test` увеличивать `Serial` в SOA, например с `2026110801` до `2026110802`. Плагин `file` проверяет изменение serial по умолчанию раз в минуту; для немедленного применения можно перезапустить сервер. См. [документацию file](https://coredns.io/plugins/file/).
-
-После изменения Dockerfile клиента или параметров сервисов в Compose:
-
-```bash
-docker compose up -d --build
-```
-
-| Проблема | Что проверить |
-|---|---|
-| Docker сообщает, что не может подключиться к daemon | Запущен ли Docker Desktop / Docker Engine и выбран ли нужный Docker context |
-| Контейнер CoreDNS перезапускается | Логи `dns-server`, синтаксис Corefile, путь и содержимое файла зоны |
-| `dig` получает таймаут | Состояние контейнеров, адрес `172.28.0.53`, общую сеть; выполнять запрос внутри `dns-client` |
-| Внутренние имена работают, внешние — нет | Доступ контейнеров к Интернету и к `1.1.1.1:53` / `8.8.8.8:53`, ограничения VPN или сети |
-| `lab.test A +short` ничего не выводит | Это ожидаемо: A-записи существуют у `app.lab.test`, у вершины зоны их нет |
-| Повторился порядок адресов | Это допустимо при случайном перемешивании; собрать большую выборку |
-| DNS работает, но HTTP не отвечает | Состояние Nginx, доступность каждого backend по IP и содержимое его страницы |
-| Docker сообщает о пересечении подсетей | Конфликт `172.28.0.0/24` с существующей сетью; новую подсеть согласовать и обновить адреса в Compose, команде клиента, зоне, страницах backend и документации |
-
-## 10. Перед сдачей
-
-- [ ] Проект запускается на другой машине по этому README.
-- [ ] Есть автоматическая проверка окружения после запуска и единый запуск тестов.
-- [ ] Собраны и объяснены результаты распределения первых A-записей.
-- [ ] Подтверждены forwarding, попадания в кэш и повторное обращение к upstream после истечения TTL.
-- [ ] Выполнено сравнение времени ответа с включённым и выключенным локальным кэшем.
-- [ ] Исходные измерения и итоговые таблицы сохранены вместе с условиями экспериментов.
-- [ ] После экспериментов восстановлена рабочая конфигурация и повторно выполнены общие проверки.
-- [ ] Каждый участник описал свой вклад; подготовлены итоговая презентация и демонстрация.
-
-Изменения общих файлов `compose.yml`, `dns/Corefile` и файла зоны следует согласовывать между участниками и объединять через Pull Requests после проверки. В `main` должна оставаться рабочая версия проекта.
+Computer Systems and Networks — Group M26-SNE-01
